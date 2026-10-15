@@ -1,0 +1,84 @@
+# Ponte FIX → Marombiew FX
+
+Serviço que fica ligado 24h, conectado à sessão **QUOTE** (só preços) da sua conta cTrader na IC.
+Ele recebe os ticks, monta as velas M5/M15/H1/H4/D1 e envia para o Marombiew FX a cada 10 segundos
+e logo que uma vela fecha. Não envia ordens: a sessão TRADE é bloqueada no código.
+
+Sem dependências: só Node 20 ou mais novo.
+
+## O que precisa
+
+1. **Um servidor ligado 24h.** O backend do Lovable não segura conexão aberta, então a ponte roda fora:
+   - VPS barata (Hetzner, Contabo, DigitalOcean), 1 vCPU e 512 MB bastam; ou
+   - Railway / Render / Fly.io como "worker" (serviço sem site), usando o Dockerfile.
+   Seu computador também funciona para teste, mas desligou, parou o feed.
+2. **A senha da conta 9010569** (a mesma do cTrader).
+3. **O token de ingestão**: a mesma string no secret `FIX_INGEST_TOKEN` do Lovable e no `INGEST_TOKEN` daqui.
+4. **O link publicado do Marombiew FX**, para montar o `INGEST_URL`.
+
+## Instalar numa VPS (Ubuntu)
+
+```bash
+# 1. Docker
+curl -fsSL https://get.docker.com | sh
+
+# 2. Copie esta pasta para o servidor (scp, git ou upload) e entre nela
+cd marombiew-fix-bridge
+cp .env.example .env
+nano .env        # preencha FIX_PASSWORD, INGEST_URL e INGEST_TOKEN
+
+# 3. Suba (reinicia sozinho se o servidor reiniciar ou a ponte cair)
+docker compose up -d --build
+
+# 4. Acompanhe
+docker compose logs -f
+```
+
+Logs esperados:
+
+```
+conectado em live.cfixapi.com:5211, enviando logon
+logon aceito
+assinado: EUR/USD, GBP/USD, USD/JPY, XAU/USD
+```
+
+Sem Docker: `node --env-file=.env src/index.js` (use `pm2` ou `systemd` para manter ligado).
+
+## Variáveis
+
+| Variável | Para quê |
+|---|---|
+| `FIX_SENDER_COMP_ID` | `live5.icmarkets.9010569` |
+| `FIX_USERNAME` | número da conta: `9010569` |
+| `FIX_PASSWORD` | senha da conta |
+| `FIX_PORT` | `5211` (SSL). Não use a porta sem SSL fora de teste |
+| `SYMBOLS` | pares no formato do app, separados por vírgula |
+| `SYMBOL_IDS` | só se um par não for encontrado sozinho: `{"XAU/USD":"41"}` |
+| `PRICE_SIDE` | `bid` (padrão, igual ao gráfico do cTrader), `ask` ou `mid` |
+| `INGEST_URL` | `https://<app publicado>/api/public/fix/ingest` |
+| `INGEST_TOKEN` | igual ao secret `FIX_INGEST_TOKEN` no Lovable |
+| `DEBUG_FIX` | `true` mostra as mensagens FIX no log (senha escondida) |
+
+## Problemas comuns
+
+- **Logout logo após o logon**: senha errada, conta errada ou FIX desligado na conta.
+  No cTrader: Configurações → FIX API confere os dados.
+- **"símbolos não encontrados"**: o nome do par na corretora é diferente. Rode com `DEBUG_FIX=true`,
+  procure a lista (mensagem `35=y`) e passe o ID em `SYMBOL_IDS`.
+- **"envio recusado: HTTP 401"**: token diferente entre a ponte e o Lovable.
+- **"envio recusado: HTTP 404"**: `INGEST_URL` errado ou o app ainda não foi publicado com a mudança.
+- **Mercado fechado** (fim de semana): não chegam ticks. A ponte continua conectada e o app volta a
+  usar a Twelve Data até os preços voltarem.
+
+## Segurança
+
+- A senha fica só no `.env` do servidor. Nunca no Lovable, no chat ou no git.
+- Se a senha da conta aparecer em algum lugar, troque no cTrader e atualize o `.env`.
+- Esta ponte nunca abre a sessão TRADE.
+
+## Testes
+
+```bash
+npm test
+```
+Testa a montagem das mensagens FIX, as velas e o fluxo completo contra um servidor FIX simulado.

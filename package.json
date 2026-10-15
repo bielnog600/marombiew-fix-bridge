@@ -1,0 +1,13 @@
+{
+  "name": "marombiew-fix-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Ponte cTrader FIX (QUOTE) -> Marombiew FX",
+  "main": "src/index.js",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env src/index.js",
+    "test": "node --test test/*.test.js"
+  }
+}
