@@ -4,6 +4,9 @@ Serviço que fica ligado 24h, conectado à sessão **QUOTE** (só preços) da su
 Ele recebe os ticks, monta as velas M5/M15/H1/H4/D1 e envia para o Marombiew FX a cada 10 segundos
 e logo que uma vela fecha. Não envia ordens: a sessão TRADE é bloqueada no código.
 
+Com `TRADE_ENABLED=true`, ela também abre a sessão **TRADE** e executa as ordens que o app
+coloca na fila (botões COMPRA/VENDA e auto trader). Desligado por padrão.
+
 Sem dependências: só Node 20 ou mais novo.
 
 ## O que precisa
@@ -59,6 +62,22 @@ Sem Docker: `node --env-file=.env src/index.js` (use `pm2` ou `systemd` para man
 | `INGEST_TOKEN` | igual ao secret `FIX_INGEST_TOKEN` no Lovable |
 | `DEBUG_FIX` | `true` mostra as mensagens FIX no log (senha escondida) |
 
+## Ordens (sessão TRADE)
+
+Fluxo: o app grava o comando → a ponte busca em `/api/public/fix/commands` a cada 1,5 s →
+envia à corretora → relata em `/api/public/fix/report` (eventos e posições abertas).
+
+O que a ponte garante, independente do app:
+
+- Toda entrada sai **a mercado** e, assim que executa, recebe **stop e alvo vinculados à posição**.
+- Se a corretora recusar o stop, a posição é **fechada na hora**. Nunca fica posição sem stop.
+- Quando o stop ou o alvo executa, a outra ordem é cancelada.
+- Recusa: comando com mais de 30 s, lote acima de `MAX_LOTS_PER_ORDER`, posições acima de
+  `MAX_OPEN_POSITIONS`, sem stop ou alvo, stop/alvo do lado errado do preço atual, par sem preço ao vivo.
+- Volume: 0.01 lote = 1.000 unidades no forex e 1 unidade (onça) no ouro. Ajustável com `LOT_SIZES`
+  e `LOT_STEPS` se a corretora usar outro tamanho.
+- Saldo e equity **não** vêm pelo FIX; isso fica para a cTrader Open API.
+
 ## Problemas comuns
 
 - **Logout logo após o logon**: senha errada, conta errada ou FIX desligado na conta.
@@ -74,7 +93,7 @@ Sem Docker: `node --env-file=.env src/index.js` (use `pm2` ou `systemd` para man
 
 - A senha fica só no `.env` do servidor. Nunca no Lovable, no chat ou no git.
 - Se a senha da conta aparecer em algum lugar, troque no cTrader e atualize o `.env`.
-- Esta ponte nunca abre a sessão TRADE.
+- A sessão TRADE só abre com `TRADE_ENABLED=true`. Para parar o robô na hora, troque para `false`.
 
 ## Testes
 

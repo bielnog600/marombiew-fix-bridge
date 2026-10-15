@@ -86,8 +86,8 @@ test("ponte completa contra servidor FIX simulado", async () => {
   await new Promise((r) => ingest.listen(0, r));
 
   const bridge = startBridge({
-    host: "127.0.0.1", port: fixServer.address().port, tls: false,
-    senderCompID: "live5.icmarkets.9", targetCompID: "cServer", senderSubID: "QUOTE",
+    host: "127.0.0.1", port: fixServer.address().port, tls: false, tradeEnabled: false,
+    senderCompID: "live5.icmarkets.9", targetCompID: "cServer",
     username: "9", password: "segredo", heartbeat: 30, priceSide: "bid",
     symbols: ["EUR/USD", "XAU/USD"], symbolIds: {},
     ingestUrl: `http://127.0.0.1:${ingest.address().port}/api/public/fix/ingest`, ingestToken: "tok",
@@ -95,8 +95,10 @@ test("ponte completa contra servidor FIX simulado", async () => {
   });
   await new Promise((r) => setTimeout(r, 1500));
   bridge.stop();
+  await new Promise((r) => setTimeout(r, 400));
   fixServer.close();
   ingest.close();
+  ingest.closeAllConnections();
 
   assert.deepEqual(fixLog.slice(0, 2), ["A", "x"]);
   assert.equal(fixLog.filter((t) => t === "V").length, 2);
@@ -107,10 +109,7 @@ test("ponte completa contra servidor FIX simulado", async () => {
   assert.equal(m5.high, 1.1215);
   assert.equal(m5.low, 1.121);
   const last = received.at(-1).status;
-  assert.equal(last.bridge_version, "1.0.1");
+  assert.equal(last.bridge_version, "1.1.0");
   assert.ok(received.some((b) => b.status.connected && b.status.symbols.includes("XAU/USD")));
 });
 
-test("recusa configuração de sessão TRADE", () => {
-  assert.throws(() => startBridge({ senderSubID: "TRADE" }), /QUOTE/);
-});
