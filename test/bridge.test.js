@@ -107,7 +107,7 @@ test("ponte completa contra servidor FIX simulado", async () => {
   assert.equal(m5.high, 1.1215);
   assert.equal(m5.low, 1.121);
   const last = received.at(-1).status;
-  assert.equal(last.bridge_version, "1.0.0");
+  assert.equal(last.bridge_version, "1.0.1");
   assert.ok(received.some((b) => b.status.connected && b.status.symbols.includes("XAU/USD")));
 });
 

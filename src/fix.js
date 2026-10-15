@@ -33,15 +33,11 @@ export function checksum(str) {
  * fields: lista de [tag, valor] do corpo, na ordem exigida (grupos repetidos incluídos).
  */
 export function encode(msgType, seq, header, fields, now = new Date()) {
-  const parts = [
-    ["35", msgType],
-    ["49", header.senderCompID],
-    ["56", header.targetCompID],
-    ["34", seq],
-    ["52", fixTime(now)],
-  ];
-  if (header.senderSubID) parts.push(["50", header.senderSubID]);
+  // Mesma ordem e formato do cliente oficial da Spotware (cTraderFixPy).
+  const parts = [["35", msgType], ["49", header.senderCompID], ["56", header.targetCompID]];
   if (header.targetSubID) parts.push(["57", header.targetSubID]);
+  if (header.senderSubID) parts.push(["50", header.senderSubID]);
+  parts.push(["34", seq], ["52", fixTime(now).slice(0, 17)]);
   for (const f of fields) parts.push(f);
   const body = parts.map(([t, v]) => `${t}=${v}${SOH}`).join("");
   const head = `8=FIX.4.4${SOH}9=${Buffer.byteLength(body, "latin1")}${SOH}`;

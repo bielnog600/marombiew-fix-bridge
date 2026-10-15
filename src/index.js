@@ -3,7 +3,7 @@
 import { QuoteSession } from "./session.js";
 import { CandleBuilder } from "./candles.js";
 
-export const VERSION = "1.0.0";
+export const VERSION = "1.0.1";
 
 const env = (k, d) => {
   const v = process.env[k];
@@ -23,11 +23,11 @@ export function loadConfig() {
     host: env("FIX_HOST", "live.cfixapi.com"),
     port: Number(env("FIX_PORT", "5211")),
     tls: env("FIX_TLS", "true") !== "false",
-    senderCompID: env("FIX_SENDER_COMP_ID"),
+    senderCompID: env("FIX_SENDER_COMP_ID").trim(),
     targetCompID: env("FIX_TARGET_COMP_ID", "cServer"),
     senderSubID: env("FIX_SENDER_SUB_ID", "QUOTE"),
-    username: env("FIX_USERNAME"),
-    password: env("FIX_PASSWORD"),
+    username: env("FIX_USERNAME").trim(),
+    password: env("FIX_PASSWORD").trim().replace(/^"(.*)"$/, "$1"),
     heartbeat: Number(env("FIX_HEARTBEAT", "30")),
     priceSide: env("PRICE_SIDE", "bid"),
     symbols,
