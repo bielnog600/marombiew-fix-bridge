@@ -6,7 +6,7 @@ import { QuoteSession } from "./session.js";
 import { TradeSession } from "./trade.js";
 import { CandleBuilder } from "./candles.js";
 
-export const VERSION = "1.1.0";
+export const VERSION = "1.1.1";
 
 const env = (k, d) => {
   const v = process.env[k];

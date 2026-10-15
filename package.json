@@ -1,6 +1,6 @@
 {
   "name": "marombiew-fix-bridge",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "private": true,
   "type": "module",
   "description": "Ponte cTrader FIX (QUOTE) -> Marombiew FX",

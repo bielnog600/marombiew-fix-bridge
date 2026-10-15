@@ -167,3 +167,40 @@ test("ouro: 0.01 lote = 1 unidade e preço com 2 casas", () => {
   assert.equal(t.toUnits("EUR/USD", 0.05), 5000);
   assert.equal(t.fmt("XAU/USD", 4170.123), "4170.12");
 });
+
+test("rejeição de negócio (35=j) e de sessão (35=3) viram ordem recusada", () => {
+  const t = new TradeSession({ symbols: ["EUR/USD"], senderCompID: "a", targetCompID: "b", heartbeat: 30, maxLots: 1, maxPositions: 3,
+    getQuote: () => ({ bid: 1.12, ask: 1.1202 }), orderTimeoutMs: 999999 });
+  const ev = [];
+  t.on("event", (e) => ev.push(e));
+  t.send = () => true;
+  t.loggedOn = true; t.ready = true; t.symIds.set("EUR/USD", "1");
+  const mk = () => ({ id: "c", created_at: new Date().toISOString(), action: "open", symbol: "EUR/USD", side: "buy", lots: 0.01, stop: 1.119, target: 1.123 });
+  t.seq = 7;
+  assert.equal(t.execute(mk()), null);
+  const cl1 = [...t.orders.keys()][0];
+  t.handle([["35", "j"], ["379", cl1], ["380", "0"], ["58", "TRADING_DISABLED"]]);
+  t.seq = 9;
+  assert.equal(t.execute(mk()), null);
+  t.handle([["35", "3"], ["45", "9"], ["371", "38"], ["58", "Invalid tag value"]]);
+  const rej = ev.filter((e) => e.type === "rejected");
+  assert.equal(rej.length, 2);
+  assert.match(rej[0].reason, /TRADING_DISABLED/);
+  assert.match(rej[1].reason, /Invalid tag value \(tag 38\)/);
+});
+
+test("sem resposta em 20 s: avisa, e se executar depois ainda coloca o stop", async () => {
+  const t = new TradeSession({ symbols: ["EUR/USD"], senderCompID: "a", targetCompID: "b", heartbeat: 30, maxLots: 1, maxPositions: 3,
+    getQuote: () => ({ bid: 1.12, ask: 1.1202 }), orderTimeoutMs: 50 });
+  const ev = [], sent = [];
+  t.on("event", (e) => ev.push(e));
+  t.send = (type, f) => { sent.push(f); return true; };
+  t.loggedOn = true; t.ready = true; t.symIds.set("EUR/USD", "1");
+  t.execute({ id: "c", created_at: new Date().toISOString(), action: "open", symbol: "EUR/USD", side: "buy", lots: 0.01, stop: 1.119, target: 1.123 });
+  await new Promise((r) => setTimeout(r, 120));
+  assert.match(ev[0].reason, /sem resposta/);
+  const cl = [...t.orders.keys()][0];
+  t.handle([["35", "8"], ["11", cl], ["150", "F"], ["39", "2"], ["6", "1.1201"], ["721", "77"]]);
+  assert.ok(ev.some((e) => e.type === "filled"));
+  assert.ok(sent.some((f) => f.some(([k, v]) => k === "40" && v === "3")), "stop colocado mesmo após o aviso");
+});

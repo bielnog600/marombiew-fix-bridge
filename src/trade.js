@@ -28,6 +28,14 @@ export class TradeSession extends FixSession {
     this.posBatch = null;
     this.posTimer = null;
     this.ready = false;
+    this.seqToOrder = new Map(); // MsgSeqNum -> ClOrdID (para rejeições 35=3)
+  }
+
+  /** Envia mensagem de ordem guardando o número de sequência, para casar rejeições de sessão. */
+  sendOrder(clOrd, type, fields) {
+    this.seqToOrder.set(String(this.seq), clOrd);
+    if (this.seqToOrder.size > 500) this.seqToOrder.delete(this.seqToOrder.keys().next().value);
+    return this.send(type, fields);
   }
 
   lotSize(sym) { return { ...DEFAULT_LOT_SIZES, ...(this.cfg.lotSizes ?? {}) }[sym] ?? 100000; }
@@ -49,6 +57,14 @@ export class TradeSession extends FixSession {
   close(reason) {
     clearInterval(this.posTimer);
     super.close(reason);
+  }
+
+  /** Rejeição de sessão (35=3) ou de negócio (35=j) para uma ordem: trata como execução recusada. */
+  onReject(f) {
+    const clOrd = get(f, "379") ?? this.seqToOrder.get(get(f, "45") ?? "");
+    if (!clOrd || !this.orders.has(clOrd)) return;
+    const reason = `${get(f, "58") ?? "recusada"}${get(f, "371") ? ` (tag ${get(f, "371")})` : ""}`;
+    this.onExecution([["35", "8"], ["11", clOrd], ["150", "8"], ["39", "8"], ["58", reason]]);
   }
 
   onMessage(type, f) {
@@ -109,8 +125,16 @@ export class TradeSession extends FixSession {
     if (cmd.side === "sell" && !(stop > q.ask && target < q.bid)) return reject(`venda exige stop > ${q.ask} e alvo < ${q.bid}`);
 
     const clOrd = this.nextId("E");
-    this.orders.set(clOrd, { kind: "entry", cmdId: cmd.id, sym, side: cmd.side, units, stop, target });
-    this.send("D", [
+    const entry = { kind: "entry", cmdId: cmd.id, sym, side: cmd.side, units, stop, target };
+    this.orders.set(clOrd, entry);
+    // sem resposta em 20 s: avisa (não marca como encerrada; se executar depois, o stop ainda é colocado)
+    setTimeout(() => {
+      if (entry.done || entry.warned) return;
+      entry.warned = true;
+      this.event("rejected", entry, { reason: "sem resposta da corretora em 20 s — confira no cTrader" });
+      this.requestPositions();
+    }, this.cfg.orderTimeoutMs ?? 20000).unref?.();
+    this.sendOrder(clOrd, "D", [
       ["11", clOrd], ["55", id], ["54", SIDE[cmd.side]], ["60", fixTime().slice(0, 17)],
       ["38", String(units)], ["40", "1"], ["494", "MBFX"],
     ]);
@@ -121,7 +145,7 @@ export class TradeSession extends FixSession {
   closePosition(p, cmdId) {
     const clOrd = this.nextId("C");
     this.orders.set(clOrd, { kind: "close", cmdId, sym: p.symbol, side: OPPOSITE[p.side], units: p.units, posId: p.position_id });
-    this.send("D", [
+    this.sendOrder(clOrd, "D", [
       ["11", clOrd], ["55", this.symIds.get(p.symbol)], ["54", SIDE[OPPOSITE[p.side]]], ["60", fixTime().slice(0, 17)],
       ["38", String(p.units)], ["40", "1"], ["721", p.position_id], ["494", "MBFX"],
     ]);
@@ -135,8 +159,8 @@ export class TradeSession extends FixSession {
     this.orders.set(tp, { kind: "tp", cmdId: o.cmdId, sym: o.sym, side: opp, units: o.units, posId });
     const id = this.symIds.get(o.sym);
     const base = [["55", id], ["54", SIDE[opp]], ["60", fixTime().slice(0, 17)], ["38", String(o.units)]];
-    this.send("D", [["11", sl], ...base, ["40", "3"], ["99", this.fmt(o.sym, o.stop)], ["721", posId], ["494", "MBFX-SL"]]);
-    this.send("D", [["11", tp], ...base, ["40", "2"], ["44", this.fmt(o.sym, o.target)], ["721", posId], ["494", "MBFX-TP"]]);
+    this.sendOrder(sl, "D", [["11", sl], ...base, ["40", "3"], ["99", this.fmt(o.sym, o.stop)], ["721", posId], ["494", "MBFX-SL"]]);
+    this.sendOrder(tp, "D", [["11", tp], ...base, ["40", "2"], ["44", this.fmt(o.sym, o.target)], ["721", posId], ["494", "MBFX-TP"]]);
   }
 
   cancel(clOrd) {
