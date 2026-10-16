@@ -95,6 +95,8 @@ export class TradeSession extends FixSession {
     this.ready = true;
     this.log(`pronta para ordens: ${[...this.symIds.keys()].join(", ")}`);
     this.requestPositions();
+    // recupera stop/alvo das posições abertas (ponte reiniciada não perde a gestão)
+    this.send("AF", [["584", this.nextId("M")], ["585", "7"]]);
   }
 
   // ---------- comandos vindos do app ----------
@@ -115,6 +117,21 @@ export class TradeSession extends FixSession {
       const p = this.positions.get(String(cmd.position_id));
       if (!p) return reject("posição não encontrada");
       this.closePosition(p, cmd.id);
+      return null;
+    }
+    if (cmd.action === "manage") {
+      const posId = String(cmd.position_id);
+      const pr = this.protect.get(posId);
+      const p = this.positions.get(posId);
+      if (!p || !pr || !pr.sl) return reject("stop da posição não encontrado na ponte");
+      pr.entry = pr.entry ?? p.entry_price;
+      const init = Number(cmd.initial_stop);
+      if (init > 0 && pr.entry) pr.risk = Math.abs(pr.entry - init);
+      if (!(pr.risk > 0)) return reject("risco inicial desconhecido (informe initial_stop)");
+      pr.manage = parseManage(cmd.manage);
+      pr.cmdId = cmd.id;
+      this.event("manage_set", { cmdId: cmd.id, sym: p.symbol, side: p.side, units: p.units, posId },
+        { reason: pr.manage ? "gestão ligada" : "gestão desligada" });
       return null;
     }
     if (cmd.action !== "open") return reject(`ação desconhecida: ${cmd.action}`);
@@ -199,7 +216,7 @@ export class TradeSession extends FixSession {
   onExecution(f) {
     const clOrd = get(f, "11");
     const o = this.orders.get(clOrd ?? "");
-    if (!o) return;
+    if (!o) return this.recoverOrder(f);
     const exec = get(f, "150");
     const status = get(f, "39");
     const reason = get(f, "58") ?? null;
@@ -277,6 +294,31 @@ export class TradeSession extends FixSession {
         this.event("closed", o, { price, reason: o.reason ?? "manual" });
       }
     }
+  }
+
+  /** Ordem de stop/alvo existente na corretora (resposta ao AF): volta a ser acompanhada. */
+  recoverOrder(f) {
+    const exec = get(f, "150");
+    const posId = get(f, "721");
+    const sym = this.ids.get(get(f, "55") ?? "");
+    const cl = get(f, "11");
+    const type = get(f, "40");
+    if (exec !== "I" || !posId || !sym || !cl || (type !== "3" && type !== "2")) return;
+    const ordSide = get(f, "54") === "1" ? "buy" : "sell";
+    const units = Number(get(f, "38") ?? 0);
+    const kind = type === "3" ? "sl" : "tp";
+    this.orders.set(cl, { kind, cmdId: null, sym, side: ordSide, units, posId });
+    const pr = this.protect.get(posId) ?? {
+      sl: null, tp: null, stop: null, target: null, cmdId: null, slOk: true, tpOk: true, reported: true,
+      sym, side: OPPOSITE[ordSide], units, entry: this.positions.get(posId)?.entry_price ?? null, risk: null, manage: null,
+      peak: 0, stage: "inicial", pending: false, lastMove: 0,
+    };
+    if (kind === "sl") { pr.sl = cl; pr.stop = Number(get(f, "99")); }
+    else { pr.tp = cl; pr.target = Number(get(f, "44")); }
+    this.protect.set(posId, pr);
+    const p = this.positions.get(posId);
+    if (p) { p.stop = pr.stop ?? p.stop; p.target = pr.target ?? p.target; }
+    this.log(`recuperado ${kind === "sl" ? "stop" : "alvo"} da posição ${posId} (${sym})`);
   }
 
   onCancelReject(f) {
@@ -365,6 +407,10 @@ export class TradeSession extends FixSession {
     }
     if (b.items.length >= b.total) {
       this.positions = new Map(b.items.map((p) => [p.position_id, p]));
+      for (const p of this.positions.values()) {
+        const pr = this.protect.get(p.position_id);
+        if (pr && !pr.entry && p.entry_price > 0) pr.entry = p.entry_price;
+      }
       this.posBatch = null;
       this.emit("positions", [...this.positions.values()].map((p) => ({ ...p, lots: this.toLots(p.symbol, p.units) })));
     }

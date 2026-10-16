@@ -81,7 +81,8 @@ O que a ponte garante, independente do app:
   - lucro ≥ `trail_start_r` × risco → stop móvel a `trail_r` × risco abaixo do pico;
   - o stop só anda a favor, nunca recua; se o lucro voltar além do novo stop antes de mover, fecha a mercado.
   - Padrão: `be_r` 0.8, `lock_pips` 1, `trail_start_r` 1, `trail_r` 0.5. Evento `stop_moved` vai no relatório.
-  - Gestão vale enquanto a ponte estiver rodando; se ela reiniciar, o último stop fica na corretora.
+  - Ao reiniciar, a ponte pede à corretora as ordens abertas (35=AF) e recupera stop e alvo de cada posição.
+  - Comando `manage` (`position_id`, `initial_stop`, `manage`) liga ou desliga a gestão numa posição já aberta.
 - Saldo e equity **não** vêm pelo FIX; isso fica para a cTrader Open API.
 
 ## Problemas comuns

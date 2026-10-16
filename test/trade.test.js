@@ -269,3 +269,26 @@ test("gestão: alteração recusada pela corretora libera nova tentativa", () =>
   t.onQuote("EUR/USD", { bid: 1.1218, ask: 1.1219 });
   assert.equal(gs(sent).length, 2);
 });
+
+test("ponte reiniciada: recupera stop e alvo da corretora e liga gestão numa posição já aberta", () => {
+  const t = new TradeSession({ symbols: ["USD/JPY"], senderCompID: "a", targetCompID: "b", heartbeat: 30, maxLots: 1, maxPositions: 3, minMoveIntervalMs: 0 });
+  const ev = [], sent = [];
+  t.on("event", (e) => ev.push(e));
+  t.send = (type, f) => { sent.push({ type, f }); return true; };
+  t.loggedOn = true; t.ready = true;
+  t.ids.set("4", "USD/JPY"); t.symIds.set("USD/JPY", "4");
+  t.positions.set("96830289", { position_id: "96830289", symbol: "USD/JPY", side: "sell", units: 1000, entry_price: 158.031 });
+  // respostas ao AF
+  t.handle([["35", "8"], ["150", "I"], ["39", "0"], ["11", "S-old"], ["55", "4"], ["54", "1"], ["40", "3"], ["38", "1000"], ["99", "158.141"], ["721", "96830289"]]);
+  t.handle([["35", "8"], ["150", "I"], ["39", "0"], ["11", "T-old"], ["55", "4"], ["54", "1"], ["40", "2"], ["38", "1000"], ["44", "157.728"], ["721", "96830289"]]);
+  const pr = t.protect.get("96830289");
+  assert.deepEqual([pr.sl, pr.tp, pr.stop, pr.target, pr.side, pr.entry], ["S-old", "T-old", 158.141, 157.728, "sell", 158.031]);
+  // app liga a gestão
+  assert.equal(t.execute({ id: "m1", created_at: new Date().toISOString(), action: "manage", position_id: "96830289", initial_stop: 158.141, manage: { be_r: 0.8, lock_pips: 1, trail_start_r: 1, trail_r: 0.5 } }), null);
+  assert.ok(ev.some((e) => e.type === "manage_set"));
+  // +17 pips (≈1,55R): stop móvel = entrada − (17 − 5,5) pips
+  t.onQuote("USD/JPY", { bid: 157.860, ask: 157.861 });
+  const g = sent.filter((s) => s.type === "G").at(-1);
+  assert.equal(get(g.f, "41"), "S-old");
+  assert.equal(get(g.f, "99"), "157.916"); // saída pelo ask 157.861: 17 pips − 5,5
+});
