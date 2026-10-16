@@ -71,7 +71,11 @@ O que a ponte garante, independente do app:
 
 - Toda entrada sai **a mercado** e, assim que executa, recebe **stop e alvo vinculados à posição**.
 - Se a corretora recusar o stop, a posição é **fechada na hora**. Nunca fica posição sem stop.
-- Quando o stop ou o alvo executa, a outra ordem é cancelada.
+- Quando o stop ou o alvo executa, a outra ordem é cancelada (formato oficial 41+37+11).
+- Fechamento manual cancela stop e alvo **antes** de mandar a ordem de fechamento.
+- A cada 15 s a ponte confere posições (AN) e ordens pendentes (AF): ordem de stop/alvo sem posição
+  correspondente (ou do mesmo lado da posição) é **órfã** e é cancelada.
+- Se mesmo assim uma ordem órfã executar e reabrir uma posição, a ponte **fecha na hora** e avisa.
 - Recusa: comando com mais de 30 s, lote acima de `MAX_LOTS_PER_ORDER`, posições acima de
   `MAX_OPEN_POSITIONS`, sem stop ou alvo, stop/alvo do lado errado do preço atual, par sem preço ao vivo.
 - Volume: 0.01 lote = 1.000 unidades no forex e 1 unidade (onça) no ouro. Ajustável com `LOT_SIZES`

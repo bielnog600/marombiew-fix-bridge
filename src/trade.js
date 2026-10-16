@@ -42,6 +42,8 @@ export class TradeSession extends FixSession {
     this.posTimer = null;
     this.ready = false;
     this.seqToOrder = new Map(); // MsgSeqNum -> ClOrdID (para rejeições 35=3)
+    this.closedPositions = new Set(); // posições que a ponte viu fechar
+    this.alerted = new Set(); // posições sem stop já avisadas
   }
 
   /** Envia mensagem de ordem guardando o número de sequência, para casar rejeições de sessão. */
@@ -173,6 +175,9 @@ export class TradeSession extends FixSession {
   }
 
   closePosition(p, cmdId, reason = "manual") {
+    const pr = this.protect.get(p.position_id);
+    if (pr) { this.cancel(pr.sl); this.cancel(pr.tp); }
+    this.closedPositions.add(String(p.position_id));
     const clOrd = this.nextId("C");
     this.orders.set(clOrd, { kind: "close", cmdId, sym: p.symbol, side: OPPOSITE[p.side], units: p.units, posId: p.position_id, reason });
     this.sendOrder(clOrd, "D", [
@@ -198,10 +203,24 @@ export class TradeSession extends FixSession {
     this.sendOrder(tp, "D", [["11", tp], ...base, ["40", "2"], ["44", this.fmt(o.sym, o.target)], ["721", posId], ["494", "MBFX-TP"]]);
   }
 
+  /** Cancela uma ordem pendente. Formato do cliente oficial da Spotware: 41 + 37 + 11. */
   cancel(clOrd) {
     const o = this.orders.get(clOrd);
-    if (!o || o.done) return;
-    this.send("F", [["41", clOrd], ["11", this.nextId("X")], ["55", this.symIds.get(o.sym)], ["54", SIDE[o.side]], ["60", fixTime().slice(0, 17)]]);
+    if (!o || o.done || o.cancelling) return;
+    o.cancelling = true;
+    const fields = [["41", clOrd]];
+    if (o.orderId) fields.push(["37", o.orderId]);
+    fields.push(["11", this.nextId("X")]);
+    this.send("F", fields);
+    this.log(`cancelando ${o.kind} ${clOrd} (${o.sym}, posição ${o.posId})`);
+    // confirmação no próximo inventário de ordens; se falhar, a varredura tenta de novo
+    setTimeout(() => { o.cancelling = false; }, 10000).unref?.();
+  }
+
+  /** Pede à corretora todas as ordens pendentes (resposta: 35=8 com 150=I). */
+  requestOrders() {
+    if (!this.loggedOn || !this.ready) return;
+    this.send("AF", [["584", this.nextId("M")], ["585", "7"]]);
   }
 
   // ---------- respostas da corretora ----------
@@ -217,6 +236,8 @@ export class TradeSession extends FixSession {
     const clOrd = get(f, "11");
     const o = this.orders.get(clOrd ?? "");
     if (!o) return this.recoverOrder(f);
+    if (get(f, "37")) o.orderId = get(f, "37");
+    if (get(f, "150") === "I") return this.checkOrphan(clOrd, o, get(f, "39"));
     const exec = get(f, "150");
     const status = get(f, "39");
     const reason = get(f, "58") ?? null;
@@ -271,8 +292,18 @@ export class TradeSession extends FixSession {
         if (pr.slOk && pr.tpOk && !pr.reported) { pr.reported = true; this.event("protection_set", o, { price: null }); }
         return;
       }
+      if (filled && (this.closedPositions.has(String(o.posId)) || !pr)) {
+        o.done = true;
+        this.log(`ORDEM ÓRFÃ executada (${o.kind} ${o.sym}, posição ${o.posId}): fechando a posição reaberta`);
+        this.event("protection_failed", o, { price, reason: "ordem órfã executada; posição reaberta fechada automaticamente" });
+        const reopened = { position_id: String(o.posId), symbol: o.sym, side: o.side, units: o.units, entry_price: price };
+        this.closedPositions.delete(String(o.posId));
+        this.closePosition(reopened, o.cmdId, "ordem órfã");
+        return;
+      }
       if (filled) {
         o.done = true;
+        this.closedPositions.add(String(o.posId));
         if (pr) this.cancel(o.kind === "sl" ? pr.tp : pr.sl);
         this.positions.delete(o.posId);
         this.protect.delete(o.posId);
@@ -307,7 +338,9 @@ export class TradeSession extends FixSession {
     const ordSide = get(f, "54") === "1" ? "buy" : "sell";
     const units = Number(get(f, "38") ?? 0);
     const kind = type === "3" ? "sl" : "tp";
-    this.orders.set(cl, { kind, cmdId: null, sym, side: ordSide, units, posId });
+    const rec = { kind, cmdId: null, sym, side: ordSide, units, posId, orderId: get(f, "37") ?? null };
+    this.orders.set(cl, rec);
+    if (this.checkOrphan(cl, rec, get(f, "39"))) return;
     const pr = this.protect.get(posId) ?? {
       sl: null, tp: null, stop: null, target: null, cmdId: null, slOk: true, tpOk: true, reported: true,
       sym, side: OPPOSITE[ordSide], units, entry: this.positions.get(posId)?.entry_price ?? null, risk: null, manage: null,
@@ -319,6 +352,25 @@ export class TradeSession extends FixSession {
     const p = this.positions.get(posId);
     if (p) { p.stop = pr.stop ?? p.stop; p.target = pr.target ?? p.target; }
     this.log(`recuperado ${kind === "sl" ? "stop" : "alvo"} da posição ${posId} (${sym})`);
+  }
+
+  /**
+   * Ordem pendente que não protege nenhuma posição aberta (posição fechada, ou mesmo lado da posição)
+   * é órfã: cancela. Retorna true se for órfã.
+   */
+  checkOrphan(cl, o, ordStatus) {
+    if (ordStatus === "2" || ordStatus === "4" || ordStatus === "8" || ordStatus === "C") { o.done = true; return false; }
+    if (o.kind !== "sl" && o.kind !== "tp") return false;
+    if (!this.positionsFresh) return false; // só decide com o inventário de posições atualizado
+    const p = this.positions.get(String(o.posId));
+    const orphan = !p || p.side === o.side;
+    if (!orphan) return false;
+    this.log(`ordem órfã encontrada (${o.kind} ${o.sym}, posição ${o.posId}): cancelando`);
+    this.event("orphan_cancelled", o, { reason: `${o.kind === "sl" ? "stop" : "alvo"} órfão cancelado` });
+    this.cancel(cl);
+    const pr = this.protect.get(String(o.posId));
+    if (pr && (pr.sl === cl || pr.tp === cl)) this.protect.delete(String(o.posId));
+    return true;
   }
 
   onCancelReject(f) {
@@ -410,7 +462,21 @@ export class TradeSession extends FixSession {
       for (const p of this.positions.values()) {
         const pr = this.protect.get(p.position_id);
         if (pr && !pr.entry && p.entry_price > 0) pr.entry = p.entry_price;
+        if (pr && pr.side !== p.side) this.protect.delete(p.position_id); // proteção de outra "vida" da posição
       }
+      if (this.closedPositions.size > 1000) this.closedPositions = new Set([...this.closedPositions].slice(-500));
+      this.positionsFresh = true;
+      this.requestOrders(); // varre ordens órfãs a cada inventário
+      // posição aberta sem stop conhecido: avisa uma vez (depois do inventário de ordens chegar)
+      setTimeout(() => {
+        for (const p of this.positions.values()) {
+          const pr = this.protect.get(p.position_id);
+          if (pr?.sl || this.alerted.has(p.position_id)) continue;
+          this.alerted.add(p.position_id);
+          this.event("protection_failed", { cmdId: null, sym: p.symbol, side: p.side, units: p.units, posId: p.position_id },
+            { reason: "posição sem stop na corretora" });
+        }
+      }, 5000).unref?.();
       this.posBatch = null;
       this.emit("positions", [...this.positions.values()].map((p) => ({ ...p, lots: this.toLots(p.symbol, p.units) })));
     }

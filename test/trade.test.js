@@ -292,3 +292,71 @@ test("ponte reiniciada: recupera stop e alvo da corretora e liga gestão numa po
   assert.equal(get(g.f, "41"), "S-old");
   assert.equal(get(g.f, "99"), "157.916"); // saída pelo ask 157.861: 17 pips − 5,5
 });
+
+function session() {
+  const t = new TradeSession({ symbols: ["GBP/USD"], senderCompID: "a", targetCompID: "b", heartbeat: 30, maxLots: 1, maxPositions: 5,
+    getQuote: () => ({ bid: 1.3345, ask: 1.3346 }), orderTimeoutMs: 999999 });
+  const ev = [], sent = [];
+  t.on("event", (e) => ev.push(e));
+  t.send = (type, f) => { sent.push({ type, f }); return true; };
+  t.loggedOn = true; t.ready = true; t.symIds.set("GBP/USD", "2"); t.ids.set("2", "GBP/USD");
+  const open = (posId) => {
+    t.execute({ id: "c" + posId, created_at: new Date().toISOString(), action: "open", symbol: "GBP/USD", side: "buy", lots: 0.01, stop: 1.3330, target: 1.3370 });
+    const cl = [...t.orders.entries()].filter(([, o]) => o.kind === "entry").at(-1)[0];
+    t.handle([["35", "8"], ["11", cl], ["37", "E" + posId], ["150", "F"], ["39", "2"], ["6", "1.3346"], ["721", posId]]);
+    const pr = t.protect.get(posId);
+    t.handle([["35", "8"], ["11", pr.sl], ["37", "SL" + posId], ["150", "0"], ["39", "0"]]);
+    t.handle([["35", "8"], ["11", pr.tp], ["37", "TP" + posId], ["150", "0"], ["39", "0"]]);
+    return pr;
+  };
+  return { t, ev, sent, open };
+}
+
+test("fechar pelo botão cancela stop e alvo ANTES de fechar, no formato oficial (41+37+11)", () => {
+  const { t, sent, open } = session();
+  open("500");
+  sent.length = 0;
+  t.execute({ id: "x", created_at: new Date().toISOString(), action: "close", position_id: "500" });
+  assert.deepEqual(sent.map((s) => s.type), ["F", "F", "D"]);
+  assert.deepEqual(sent[0].f.map(([k]) => k), ["41", "37", "11"]);
+  assert.equal(get(sent[0].f, "37"), "SL500");
+});
+
+test("stop/alvo órfão que executa depois do fechamento: posição reaberta é fechada na hora", () => {
+  const { t, ev, sent, open } = session();
+  const pr = open("600");
+  const tp = pr.tp;
+  t.execute({ id: "x", created_at: new Date().toISOString(), action: "close", position_id: "600" });
+  const closeCl = [...t.orders.entries()].find(([, o]) => o.kind === "close")[0];
+  t.handle([["35", "8"], ["11", closeCl], ["150", "F"], ["39", "2"], ["6", "1.3340"], ["721", "600"]]);
+  sent.length = 0;
+  // cancelamento falhou na corretora e o alvo executa horas depois, reabrindo a posição vendida
+  t.handle([["35", "8"], ["11", tp], ["150", "F"], ["39", "2"], ["6", "1.3370"], ["721", "600"]]);
+  assert.ok(ev.some((e) => e.type === "protection_failed" && /órfã/.test(e.reason)));
+  const close = sent.find((s) => s.type === "D");
+  assert.equal(get(close.f, "721"), "600");
+  assert.equal(get(close.f, "54"), "1", "compra para fechar a venda reaberta");
+});
+
+test("varredura: ordem pendente de posição que não existe mais é cancelada; a de posição aberta fica", () => {
+  const { t, ev, sent, open } = session();
+  open("700");
+  t.positionsFresh = true;
+  sent.length = 0;
+  // inventário: SL da 700 (válido) e um TP órfão de uma posição 699 que não está aberta
+  t.handle([["35", "8"], ["11", t.protect.get("700").sl], ["37", "SL700"], ["150", "I"], ["39", "0"], ["721", "700"]]);
+  t.handle([["35", "8"], ["11", "T-velho"], ["37", "TPX"], ["150", "I"], ["39", "0"], ["55", "2"], ["54", "2"], ["40", "2"], ["38", "1000"], ["44", "1.3368"], ["721", "699"]]);
+  const cancels = sent.filter((s) => s.type === "F");
+  assert.equal(cancels.length, 1);
+  assert.equal(get(cancels[0].f, "41"), "T-velho");
+  assert.ok(ev.some((e) => e.type === "orphan_cancelled"));
+});
+
+test("ordem do mesmo lado da posição (posição reaberta ao contrário) também é órfã", () => {
+  const { t, sent } = session();
+  t.positions.set("800", { position_id: "800", symbol: "GBP/USD", side: "sell", units: 1000, entry_price: 1.3337 });
+  t.positionsFresh = true;
+  // stop de venda (de uma compra antiga) apontando para a 800 que agora está vendida
+  t.handle([["35", "8"], ["11", "S-antigo"], ["37", "SLX"], ["150", "I"], ["39", "0"], ["55", "2"], ["54", "2"], ["40", "3"], ["38", "1000"], ["99", "1.3330"], ["721", "800"]]);
+  assert.equal(get(sent.find((s) => s.type === "F").f, "41"), "S-antigo");
+});
