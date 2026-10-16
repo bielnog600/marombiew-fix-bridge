@@ -10,6 +10,19 @@ export const DEFAULT_STEPS = { "XAU/USD": 1 };
 const DEFAULT_DIGITS = (s) => (s.includes("JPY") ? 3 : s.startsWith("XAU") ? 2 : 5);
 
 const SIDE = { buy: "1", sell: "2" };
+export const pipSize = (s) => (s.includes("JPY") ? 0.01 : s.startsWith("XAU") ? 0.1 : 0.0001);
+
+/** Lê e limita a gestão pedida pelo app. null = sem gestão (stop fixo). */
+export function parseManage(m) {
+  if (!m || m.enabled === false) return null;
+  const n = (v, d, lo, hi) => { const x = Number(v ?? d); return Number.isFinite(x) ? Math.min(hi, Math.max(lo, x)) : d; };
+  return {
+    beR: n(m.be_r, 0.8, 0.3, 3),            // lucro (em R) que leva o stop para a entrada
+    lockPips: n(m.lock_pips, 1, 0, 20),      // pips garantidos ao mover para a entrada
+    trailStartR: n(m.trail_start_r, 1, 0.3, 5), // lucro (em R) que liga o stop móvel
+    trailR: n(m.trail_r, 0.5, 0.2, 3),       // quanto do pico o stop móvel deixa devolver (em R)
+  };
+}
 const OPPOSITE = { buy: "sell", sell: "buy" };
 
 export class TradeSession extends FixSession {
@@ -71,7 +84,7 @@ export class TradeSession extends FixSession {
     if (type === "y") return this.onSecurityList(f);
     if (type === "8") return this.onExecution(f);
     if (type === "AP") return this.onPositionReport(f);
-    if (type === "9") this.log(`cancelamento recusado: ${get(f, "58") ?? ""}`);
+    if (type === "9") return this.onCancelReject(f);
   }
 
   onSecurityList(f) {
@@ -125,7 +138,7 @@ export class TradeSession extends FixSession {
     if (cmd.side === "sell" && !(stop > q.ask && target < q.bid)) return reject(`venda exige stop > ${q.ask} e alvo < ${q.bid}`);
 
     const clOrd = this.nextId("E");
-    const entry = { kind: "entry", cmdId: cmd.id, sym, side: cmd.side, units, stop, target };
+    const entry = { kind: "entry", cmdId: cmd.id, sym, side: cmd.side, units, stop, target, manage: parseManage(cmd.manage) };
     this.orders.set(clOrd, entry);
     // sem resposta em 20 s: avisa (não marca como encerrada; se executar depois, o stop ainda é colocado)
     setTimeout(() => {
@@ -142,9 +155,9 @@ export class TradeSession extends FixSession {
     return null;
   }
 
-  closePosition(p, cmdId) {
+  closePosition(p, cmdId, reason = "manual") {
     const clOrd = this.nextId("C");
-    this.orders.set(clOrd, { kind: "close", cmdId, sym: p.symbol, side: OPPOSITE[p.side], units: p.units, posId: p.position_id });
+    this.orders.set(clOrd, { kind: "close", cmdId, sym: p.symbol, side: OPPOSITE[p.side], units: p.units, posId: p.position_id, reason });
     this.sendOrder(clOrd, "D", [
       ["11", clOrd], ["55", this.symIds.get(p.symbol)], ["54", SIDE[OPPOSITE[p.side]]], ["60", fixTime().slice(0, 17)],
       ["38", String(p.units)], ["40", "1"], ["721", p.position_id], ["494", "MBFX"],
@@ -154,7 +167,12 @@ export class TradeSession extends FixSession {
   placeProtection(posId, o) {
     const opp = OPPOSITE[o.side];
     const sl = this.nextId("S"), tp = this.nextId("T");
-    this.protect.set(posId, { sl, tp, stop: o.stop, target: o.target, cmdId: o.cmdId, slOk: false, tpOk: false });
+    this.protect.set(posId, {
+      sl, tp, stop: o.stop, target: o.target, cmdId: o.cmdId, slOk: false, tpOk: false,
+      sym: o.sym, side: o.side, units: o.units, entry: o.fillPrice ?? null,
+      risk: o.fillPrice ? Math.abs(o.fillPrice - o.stop) : null, manage: o.manage ?? null,
+      peak: 0, stage: "inicial", pending: false, lastMove: 0,
+    });
     this.orders.set(sl, { kind: "sl", cmdId: o.cmdId, sym: o.sym, side: opp, units: o.units, posId });
     this.orders.set(tp, { kind: "tp", cmdId: o.cmdId, sym: o.sym, side: opp, units: o.units, posId });
     const id = this.symIds.get(o.sym);
@@ -196,6 +214,7 @@ export class TradeSession extends FixSession {
       if (filled && !o.done) {
         o.done = true;
         o.posId = posId;
+        o.fillPrice = price;
         this.positions.set(String(posId), { position_id: String(posId), symbol: o.sym, side: o.side, units: o.units, entry_price: price, stop: o.stop, target: o.target });
         this.event("filled", o, { price });
         if (!posId) {
@@ -215,6 +234,19 @@ export class TradeSession extends FixSession {
         // posição sem proteção não fica aberta
         const p = this.positions.get(o.posId);
         if (p && o.kind === "sl") { this.log(`stop recusado, fechando posição ${o.posId}`); this.closePosition(p, o.cmdId); }
+        return;
+      }
+      if (exec === "5" && pr && o.replacing) {
+        o.replacing = false;
+        const old = this.orders.get(o.origClOrd);
+        if (old) old.done = true;
+        pr.sl = clOrd;
+        pr.stop = o.newStop;
+        pr.pending = false;
+        const p = this.positions.get(o.posId);
+        if (p) p.stop = o.newStop;
+        this.log(`stop movido para ${this.fmt(o.sym, o.newStop)} (${o.stage})`);
+        this.event("stop_moved", o, { price: o.newStop, reason: o.stage });
         return;
       }
       if (exec === "0" && pr && !filled) {
@@ -242,9 +274,68 @@ export class TradeSession extends FixSession {
         if (pr) { this.cancel(pr.sl); this.cancel(pr.tp); }
         this.positions.delete(o.posId);
         this.protect.delete(o.posId);
-        this.event("closed", o, { price, reason: "manual" });
+        this.event("closed", o, { price, reason: o.reason ?? "manual" });
       }
     }
+  }
+
+  onCancelReject(f) {
+    const o = this.orders.get(get(f, "11") ?? "");
+    this.log(`alteração/cancelamento recusado: ${get(f, "58") ?? ""}`);
+    if (!o?.replacing) return;
+    o.replacing = false;
+    o.done = true;
+    const pr = this.protect.get(o.posId);
+    if (pr) { pr.pending = false; pr.lastMove = Date.now(); }
+  }
+
+  // ---------- gestão do lucro (stop na entrada + stop móvel) ----------
+
+  /**
+   * Chamado a cada tick. Só mexe no stop a favor da posição; nunca afasta o stop.
+   * Se o novo stop já estiver do lado errado do preço (o lucro voltou rápido), fecha a mercado.
+   */
+  onQuote(sym, q, now = Date.now()) {
+    if (!this.loggedOn || !this.ready || !q || !(q.bid > 0) || !(q.ask > 0)) return;
+    for (const [posId, pr] of this.protect) {
+      if (pr.sym !== sym || !pr.manage || !pr.slOk || pr.pending || !pr.entry || !(pr.risk > 0)) continue;
+      const sign = pr.side === "buy" ? 1 : -1;
+      const exit = pr.side === "buy" ? q.bid : q.ask; // preço pelo qual a posição fecharia agora
+      const profit = (exit - pr.entry) * sign;
+      pr.peak = Math.max(pr.peak, profit);
+      const m = pr.manage, pip = pipSize(sym);
+      let want = null, stage = null;
+      if (pr.peak >= m.beR * pr.risk) { want = pr.entry + sign * m.lockPips * pip; stage = "stop na entrada"; }
+      if (pr.peak >= m.trailStartR * pr.risk) {
+        const trail = pr.entry + sign * (pr.peak - m.trailR * pr.risk);
+        if (want === null || (trail - want) * sign > 0) { want = trail; stage = "stop móvel"; }
+      }
+      if (want === null) continue;
+      // só melhora o stop, e só quando a melhora vale a pena (≥ 1 pip) — evita mexer a cada tick
+      if ((want - pr.stop) * sign < pip) continue;
+      const p = this.positions.get(posId);
+      if (!p) continue;
+      // lucro já voltou além do novo stop: fecha agora a mercado
+      if ((exit - want) * sign <= 0) {
+        pr.pending = true;
+        this.log(`lucro devolvido em ${sym}, fechando a mercado (${stage})`);
+        this.closePosition(p, pr.cmdId, stage);
+        continue;
+      }
+      if (now - pr.lastMove < (this.cfg.minMoveIntervalMs ?? 2000)) continue;
+      this.moveStop(posId, pr, Number(this.fmt(sym, want)), stage);
+    }
+  }
+
+  moveStop(posId, pr, newStop, stage) {
+    const orig = pr.sl;
+    const old = this.orders.get(orig);
+    if (!old || old.done) return;
+    const cl = this.nextId("S");
+    this.orders.set(cl, { ...old, done: false, replacing: true, origClOrd: orig, newStop, stage });
+    pr.pending = true;
+    pr.lastMove = Date.now();
+    this.sendOrder(cl, "G", [["41", orig], ["11", cl], ["38", String(pr.units)], ["99", this.fmt(pr.sym, newStop)]]);
   }
 
   requestPositions() {

@@ -76,6 +76,12 @@ O que a ponte garante, independente do app:
   `MAX_OPEN_POSITIONS`, sem stop ou alvo, stop/alvo do lado errado do preço atual, par sem preço ao vivo.
 - Volume: 0.01 lote = 1.000 unidades no forex e 1 unidade (onça) no ouro. Ajustável com `LOT_SIZES`
   e `LOT_STEPS` se a corretora usar outro tamanho.
+- **Gestão do lucro** (quando o comando traz `manage`, o app manda isso no auto trader):
+  - lucro ≥ `be_r` × risco → stop vai para a entrada + `lock_pips`;
+  - lucro ≥ `trail_start_r` × risco → stop móvel a `trail_r` × risco abaixo do pico;
+  - o stop só anda a favor, nunca recua; se o lucro voltar além do novo stop antes de mover, fecha a mercado.
+  - Padrão: `be_r` 0.8, `lock_pips` 1, `trail_start_r` 1, `trail_r` 0.5. Evento `stop_moved` vai no relatório.
+  - Gestão vale enquanto a ponte estiver rodando; se ela reiniciar, o último stop fica na corretora.
 - Saldo e equity **não** vêm pelo FIX; isso fica para a cTrader Open API.
 
 ## Problemas comuns

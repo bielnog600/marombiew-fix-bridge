@@ -204,3 +204,68 @@ test("sem resposta em 20 s: avisa, e se executar depois ainda coloca o stop", as
   assert.ok(ev.some((e) => e.type === "filled"));
   assert.ok(sent.some((f) => f.some(([k, v]) => k === "40" && v === "3")), "stop colocado mesmo após o aviso");
 });
+
+function managed(side = "buy", manage = { be_r: 0.8, lock_pips: 1, trail_start_r: 1, trail_r: 0.5 }) {
+  const t = new TradeSession({ symbols: ["EUR/USD"], senderCompID: "a", targetCompID: "b", heartbeat: 30, maxLots: 1, maxPositions: 3,
+    getQuote: () => ({ bid: 1.1200, ask: 1.1201 }), orderTimeoutMs: 999999, minMoveIntervalMs: 0 });
+  const ev = [], sent = [];
+  t.on("event", (e) => ev.push(e));
+  t.send = (type, f) => { sent.push({ type, f }); return true; };
+  t.loggedOn = true; t.ready = true; t.symIds.set("EUR/USD", "1");
+  const buy = side === "buy";
+  t.execute({ id: "c", created_at: new Date().toISOString(), action: "open", symbol: "EUR/USD", side,
+    lots: 0.01, stop: buy ? 1.1180 : 1.1221, target: buy ? 1.1240 : 1.1161, manage });
+  const entryCl = [...t.orders.keys()][0];
+  t.handle([["35", "8"], ["11", entryCl], ["150", "F"], ["39", "2"], ["6", buy ? "1.1200" : "1.1201"], ["721", "9"]]);
+  const pr = t.protect.get("9");
+  t.handle([["35", "8"], ["11", pr.sl], ["150", "0"], ["39", "0"]]);
+  t.handle([["35", "8"], ["11", pr.tp], ["150", "0"], ["39", "0"]]);
+  const ack = () => { const g = sent.filter((s) => s.type === "G").at(-1); t.handle([["35", "8"], ["11", get(g.f, "11")], ["41", get(g.f, "41")], ["150", "5"], ["39", "0"]]); return g; };
+  return { t, ev, sent, pr, ack };
+}
+const gs = (sent) => sent.filter((s) => s.type === "G");
+
+test("gestão: stop vai para a entrada e depois segue o lucro; nunca recua", () => {
+  const { t, ev, sent, pr, ack } = managed("buy"); // risco 20 pips
+  t.onQuote("EUR/USD", { bid: 1.1210, ask: 1.1211 }); // +0,5R: nada
+  assert.equal(gs(sent).length, 0);
+  t.onQuote("EUR/USD", { bid: 1.1217, ask: 1.1218 }); // +0,85R: stop na entrada +1 pip
+  assert.equal(get(ack().f, "99"), "1.12010");
+  assert.equal(pr.stop, 1.1201);
+  t.onQuote("EUR/USD", { bid: 1.1230, ask: 1.1231 }); // +1,5R: stop móvel = pico − 0,5R = 1.1220
+  assert.equal(get(ack().f, "99"), "1.12200");
+  const before = gs(sent).length;
+  t.onQuote("EUR/USD", { bid: 1.1225, ask: 1.1226 }); // recuou: stop não se mexe
+  assert.equal(gs(sent).length, before);
+  assert.equal(pr.stop, 1.122);
+  assert.ok(ev.filter((e) => e.type === "stop_moved").length === 2);
+});
+
+test("gestão: se o lucro já voltou além do novo stop, fecha a mercado", () => {
+  const { t, sent, pr } = managed("buy");
+  pr.peak = 0.0030; // já teve +1,5R
+  t.onQuote("EUR/USD", { bid: 1.1205, ask: 1.1206 }); // agora só +0,25R, abaixo do stop desejado
+  const close = sent.filter((s) => s.type === "D").at(-1);
+  assert.equal(get(close.f, "721"), "9");
+  assert.equal(get(close.f, "54"), "2");
+});
+
+test("gestão: venda funciona espelhada e sem gestão o stop fica fixo", () => {
+  const { t, sent, ack } = managed("sell"); // entrada 1.1201, risco 20 pips
+  t.onQuote("EUR/USD", { bid: 1.1183, ask: 1.1184 }); // +0,85R
+  assert.equal(get(ack().f, "99"), "1.12000");
+  const fixed = managed("buy", null);
+  fixed.t.onQuote("EUR/USD", { bid: 1.1235, ask: 1.1236 });
+  assert.equal(gs(fixed.sent).length, 0);
+});
+
+test("gestão: alteração recusada pela corretora libera nova tentativa", () => {
+  const { t, sent, pr } = managed("buy");
+  t.onQuote("EUR/USD", { bid: 1.1217, ask: 1.1218 });
+  const g = gs(sent).at(-1);
+  t.handle([["35", "9"], ["11", get(g.f, "11")], ["41", get(g.f, "41")], ["58", "TOO_CLOSE"]]);
+  assert.equal(pr.pending, false);
+  assert.equal(pr.stop, 1.118);
+  t.onQuote("EUR/USD", { bid: 1.1218, ask: 1.1219 });
+  assert.equal(gs(sent).length, 2);
+});

@@ -6,7 +6,7 @@ import { QuoteSession } from "./session.js";
 import { TradeSession } from "./trade.js";
 import { CandleBuilder } from "./candles.js";
 
-export const VERSION = "1.1.1";
+export const VERSION = "1.2.0";
 
 const env = (k, d) => {
   const v = process.env[k];
@@ -74,7 +74,11 @@ export function startBridge(cfg = loadConfig()) {
   const quote = new QuoteSession({ ...cfg, log });
   const qs = { connected: false, lastTickAt: null, subscribed: [], message: "iniciando", backoff: 2000 };
   reconnecting(quote, qs, isStopped);
-  quote.on("tick", (sym, price, ts) => { builder.tick(sym, price, ts); qs.lastTickAt = new Date(ts).toISOString(); });
+  quote.on("tick", (sym, price, ts, q) => {
+    builder.tick(sym, price, ts);
+    qs.lastTickAt = new Date(ts).toISOString();
+    trade?.onQuote(sym, q);
+  });
   quote.on("subscribed", (s) => (qs.subscribed = s));
   quote.on("up", () => push());
   quote.on("down", () => push());
