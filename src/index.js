@@ -8,7 +8,7 @@ import { CandleBuilder } from "./candles.js";
 import { OpenApiAccount } from "./openapi.js";
 import { OpenApiTrader } from "./openapi-trade.js";
 
-export const VERSION = "1.6.0";
+export const VERSION = "1.6.1";
 
 const env = (k, d) => {
   const v = process.env[k];
@@ -196,10 +196,13 @@ export function startBridge(cfg = loadConfig()) {
       },
     });
     let lastSent = "";
+    let lastAt = 0;
     openapi.on("account", (a) => {
+      // manda quando muda, e pelo menos a cada 60 s (o app considera velho depois de 5 min)
       const key = `${a.balance}|${a.equity}|${a.margin_used}`;
-      if (key === lastSent) return;
+      if (key === lastSent && Date.now() - lastAt < 60000) return;
       lastSent = key;
+      lastAt = Date.now();
       pendingAccount = a;
       report();
     });
