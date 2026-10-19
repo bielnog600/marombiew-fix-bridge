@@ -5,8 +5,9 @@
 import { QuoteSession } from "./session.js";
 import { TradeSession } from "./trade.js";
 import { CandleBuilder } from "./candles.js";
+import { OpenApiAccount } from "./openapi.js";
 
-export const VERSION = "1.4.0";
+export const VERSION = "1.5.0";
 
 const env = (k, d) => {
   const v = process.env[k];
@@ -40,6 +41,9 @@ export function loadConfig() {
     ingestToken: env("INGEST_TOKEN"),
     pushEveryMs: Number(env("PUSH_EVERY_MS", "10000")),
     tradeEnabled: env("TRADE_ENABLED", "false") === "true",
+    openApiEnabled: env("OPENAPI_ENABLED", "true") === "true",
+    openApiUrl: env("OPENAPI_URL", "wss://live.ctraderapi.com:5036"),
+    authUrl: env("CTRADER_AUTH_URL", ingestUrl.replace(/\/ingest$/, "/ctrader-auth")),
     pollEveryMs: Number(env("POLL_EVERY_MS", "1500")),
     maxLots: Number(env("MAX_LOTS_PER_ORDER", "0.10")),
     maxPositions: Number(env("MAX_OPEN_POSITIONS", "3")),
@@ -123,23 +127,27 @@ export function startBridge(cfg = loadConfig()) {
   const pendingEvents = [];
   let pendingPositions = null;
   let reporting = false;
+  let pendingAccount = null;
 
   async function report() {
-    if (reporting || !trade) return;
+    if (reporting || (!trade && !pendingAccount)) return;
     reporting = true;
     const events = pendingEvents.splice(0);
     const positions = pendingPositions;
     pendingPositions = null;
+    const account = pendingAccount;
+    pendingAccount = null;
     try {
       const res = await fetch(cfg.reportUrl, {
         method: "POST", headers: { "content-type": "application/json", ...auth },
-        body: JSON.stringify({ trade_connected: ts.connected && trade.ready, events, positions }),
+        body: JSON.stringify({ trade_connected: !!(trade && ts.connected && trade.ready), events, positions, ...(account ? { account } : {}) }),
         signal: AbortSignal.timeout(15000),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status} ${(await res.text()).slice(0, 200)}`);
     } catch (e) {
       pendingEvents.unshift(...events);
       if (positions && !pendingPositions) pendingPositions = positions;
+      if (account && !pendingAccount) pendingAccount = account;
       log(`[TRADE] falha ao relatar: ${e.message}`);
       reporting = false;
       if (!stopped) setTimeout(report, 5000);
@@ -148,6 +156,7 @@ export function startBridge(cfg = loadConfig()) {
       reporting = false;
       // eventos que chegaram durante o envio saem logo em seguida
       if (!stopped && (pendingEvents.length || pendingPositions)) setTimeout(report, 300);
+      if (!stopped && pendingAccount) setTimeout(report, 1000);
     }
   }
 
@@ -189,7 +198,30 @@ export function startBridge(cfg = loadConfig()) {
     log("sessão TRADE desligada (TRADE_ENABLED=false): só preços");
   }
 
+  // ---------- saldo real (cTrader Open API) ----------
+  let openapi = null;
+  if (cfg.openApiEnabled) {
+    openapi = new OpenApiAccount({
+      url: cfg.openApiUrl, login: cfg.username, log, pollMs: 5000,
+      getAuth: async () => {
+        const res = await fetch(cfg.authUrl, { headers: auth, signal: AbortSignal.timeout(10000) });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      },
+    });
+    let lastSent = "";
+    openapi.on("account", (a) => {
+      const key = `${a.balance}|${a.equity}|${a.margin_used}`;
+      if (key === lastSent) return;
+      lastSent = key;
+      pendingAccount = a;
+      report();
+    });
+    openapi.start();
+  }
+
   const stop = () => {
+    openapi?.stop();
     stopped = true;
     clearInterval(pushTimer);
     clearInterval(pollTimer);

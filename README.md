@@ -89,6 +89,13 @@ O que a ponte garante, independente do app:
   - Comando `manage` (`position_id`, `initial_stop`, `manage`) liga ou desliga a gestão numa posição já aberta.
 - Saldo e equity **não** vêm pelo FIX; isso fica para a cTrader Open API.
 
+## Saldo real (cTrader Open API)
+
+A ponte abre uma conexão Open API (WebSocket, só leitura) e manda saldo, equity e margem da conta
+para o app a cada 5 s, junto com o relatório. Os tokens vêm do app (`/api/public/fix/ctrader-auth`),
+depois que você clica em "Conectar conta cTrader" na aba Conta. Sem token, ela só tenta de novo a cada
+60 s e o resto continua funcionando. Desligar: `OPENAPI_ENABLED=false`.
+
 ## Problemas comuns
 
 - **Logout logo após o logon**: senha errada, conta errada ou FIX desligado na conta.
