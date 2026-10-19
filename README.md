@@ -89,6 +89,21 @@ O que a ponte garante, independente do app:
   - Comando `manage` (`position_id`, `initial_stop`, `manage`) liga ou desliga a gestão numa posição já aberta.
 - Saldo e equity **não** vêm pelo FIX; isso fica para a cTrader Open API.
 
+## Ordens pela cTrader Open API (padrão desde a 1.6.0)
+
+Com `TRADE_ENABLED=true`, as ordens saem pela **Open API** (`TRADE_VIA=openapi`, o padrão), na mesma
+conexão do saldo. O stop e o alvo vão **na própria ordem** e ficam presos à posição: fechou a posição,
+eles somem juntos. Não existe mais ordem de stop/alvo solta que possa reabrir posição.
+
+- O token precisa da permissão **"Access your accounts and trade"**. O log mostra
+  `permissão do token: operar (trading)`. Se mostrar `SÓ LEITURA`, reconecte a conta na aba Conta do app.
+- Stop e alvo são enviados relativos ao preço de execução: com deslize, o risco planejado se mantém.
+- Se a posição nascer sem stop, a ponte coloca o stop; se a corretora recusar, fecha a posição na hora.
+- Stop na entrada e stop móvel alteram o stop da posição (amend). O plano da gestão fica gravado no
+  comentário da posição, então uma ponte reiniciada continua a gestão.
+- Nesse modo a sessão FIX TRADE não é aberta. A FIX continua só para os preços.
+- Para voltar às ordens pela FIX: `TRADE_VIA=fix`.
+
 ## Saldo real (cTrader Open API)
 
 A ponte abre uma conexão Open API (WebSocket, só leitura) e manda saldo, equity e margem da conta

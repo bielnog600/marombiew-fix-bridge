@@ -1,5 +1,6 @@
 // cTrader Open API (JSON sobre WebSocket): saldo, equity e margem reais da conta.
-// Só leitura. Os tokens OAuth vêm do app (/api/public/fix/ctrader-auth).
+// A mesma conexão também leva as ordens (veja openapi-trade.js).
+// Os tokens OAuth vêm do app (/api/public/fix/ctrader-auth).
 import { EventEmitter } from "node:events";
 
 export const PT = {
@@ -10,6 +11,9 @@ export const PT = {
   RECONCILE_REQ: 2124, RECONCILE_RES: 2125,
   EXECUTION_EVENT: 2126,
   ERROR_RES: 2142,
+  NEW_ORDER_REQ: 2106, AMEND_SLTP_REQ: 2110, CLOSE_POSITION_REQ: 2111,
+  SYMBOLS_LIST_REQ: 2114, SYMBOLS_LIST_RES: 2115, SYMBOL_BY_ID_REQ: 2116, SYMBOL_BY_ID_RES: 2117,
+  ORDER_ERROR_EVENT: 2132,
   ACCOUNTS_BY_TOKEN_REQ: 2149, ACCOUNTS_BY_TOKEN_RES: 2150,
   ACCOUNT_DISCONNECT: 2164, TOKEN_INVALIDATED: 2147,
   UNREALIZED_PNL_REQ: 2187, UNREALIZED_PNL_RES: 2188,
@@ -37,8 +41,10 @@ export class OpenApiAccount extends EventEmitter {
   }
 
   send(payloadType, payload = {}) {
-    if (!this.ws || this.ws.readyState !== 1) return;
-    this.ws.send(JSON.stringify({ clientMsgId: `m${this.seq++}`, payloadType, payload }));
+    if (!this.ws || this.ws.readyState !== 1) return null;
+    const clientMsgId = `m${this.seq++}`;
+    this.ws.send(JSON.stringify({ clientMsgId, payloadType, payload }));
+    return clientMsgId;
   }
 
   async start() {
@@ -89,6 +95,7 @@ export class OpenApiAccount extends EventEmitter {
 
   handle(m) {
     const p = m.payload ?? {};
+    this.emit("message", m);
     switch (m.payloadType) {
       case PT.APP_AUTH_RES:
         this.send(PT.ACCOUNTS_BY_TOKEN_REQ, { accessToken: this.auth.access_token });
@@ -102,12 +109,17 @@ export class OpenApiAccount extends EventEmitter {
           return;
         }
         this.accountId = acc.ctidTraderAccountId;
+        // permissionScope: 0/SCOPE_VIEW = só leitura, 1/SCOPE_TRADE = pode operar
+        const sc = p.permissionScope;
+        this.scope = sc === 1 || sc === "SCOPE_TRADE" ? "trade" : sc === 0 || sc === "SCOPE_VIEW" ? "view" : "desconhecida";
+        this.log(`permissão do token: ${this.scope === "trade" ? "operar (trading)" : this.scope === "view" ? "SÓ LEITURA — reconecte a conta no app para operar" : this.scope}`);
         this.send(PT.ACCOUNT_AUTH_REQ, { ctidTraderAccountId: this.accountId, accessToken: this.auth.access_token });
         return;
       }
       case PT.ACCOUNT_AUTH_RES:
         this.log(`conta ${this.cfg.login} autenticada`);
         this.emit("status", { connected: true });
+        this.emit("authorized", { accountId: this.accountId, scope: this.scope });
         this.poll();
         this.timers.push(setInterval(() => this.poll(), this.cfg.pollMs ?? 5000));
         return;
@@ -138,7 +150,8 @@ export class OpenApiAccount extends EventEmitter {
         return;
       case PT.ERROR_RES:
         this.log(`erro ${p.errorCode}: ${p.description ?? ""}`);
-        if (/TOKEN|ACCESS/i.test(p.errorCode ?? "")) { this.auth = null; try { this.ws.close(); } catch {} }
+        // só erro de token derruba a conexão (ACCESS_DENIED de uma ordem não pode desligar o saldo)
+        if (/TOKEN/i.test(p.errorCode ?? "")) { this.auth = null; try { this.ws.close(); } catch {} }
         return;
       case PT.TOKEN_INVALIDATED:
       case PT.ACCOUNT_DISCONNECT:

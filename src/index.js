@@ -6,8 +6,9 @@ import { QuoteSession } from "./session.js";
 import { TradeSession } from "./trade.js";
 import { CandleBuilder } from "./candles.js";
 import { OpenApiAccount } from "./openapi.js";
+import { OpenApiTrader } from "./openapi-trade.js";
 
-export const VERSION = "1.5.0";
+export const VERSION = "1.6.0";
 
 const env = (k, d) => {
   const v = process.env[k];
@@ -41,6 +42,8 @@ export function loadConfig() {
     ingestToken: env("INGEST_TOKEN"),
     pushEveryMs: Number(env("PUSH_EVERY_MS", "10000")),
     tradeEnabled: env("TRADE_ENABLED", "false") === "true",
+    // por onde as ordens saem: "openapi" (padrão; stop/alvo presos na posição) ou "fix"
+    tradeVia: env("TRADE_VIA", "openapi").toLowerCase(),
     openApiEnabled: env("OPENAPI_ENABLED", "true") === "true",
     openApiUrl: env("OPENAPI_URL", "wss://live.ctraderapi.com:5036"),
     authUrl: env("CTRADER_AUTH_URL", ingestUrl.replace(/\/ingest$/, "/ctrader-auth")),
@@ -181,23 +184,6 @@ export function startBridge(cfg = loadConfig()) {
     }
   }
 
-  if (cfg.tradeEnabled) {
-    trade = new TradeSession({
-      ...cfg, port: cfg.tradePort, log,
-      maxLots: cfg.maxLots, maxPositions: cfg.maxPositions,
-      getQuote: (s) => quote.quotes.get(s),
-    });
-    reconnecting(trade, ts, isStopped);
-    trade.on("event", (e) => { log(`[TRADE] ${e.type} ${e.symbol} ${e.price ?? ""} ${e.reason ?? ""}`); pendingEvents.push(e); report(); });
-    trade.on("positions", (p) => { pendingPositions = p; report(); });
-    trade.on("down", () => report());
-    pollTimer = setInterval(poll, cfg.pollEveryMs);
-    trade.connect();
-    log(`sessão TRADE ligada (máx ${cfg.maxLots} lote por ordem, ${cfg.maxPositions} posições)`);
-  } else {
-    log("sessão TRADE desligada (TRADE_ENABLED=false): só preços");
-  }
-
   // ---------- saldo real (cTrader Open API) ----------
   let openapi = null;
   if (cfg.openApiEnabled) {
@@ -217,8 +203,42 @@ export function startBridge(cfg = loadConfig()) {
       pendingAccount = a;
       report();
     });
-    openapi.start();
   }
+
+  const viaOpenApi = cfg.tradeEnabled && cfg.tradeVia !== "fix" && !!openapi;
+  if (cfg.tradeEnabled && cfg.tradeVia !== "fix" && !openapi) log("TRADE_VIA=openapi exige OPENAPI_ENABLED=true; usando FIX");
+
+  if (viaOpenApi) {
+    trade = new OpenApiTrader({
+      account: openapi, symbols: cfg.symbols, log,
+      maxLots: cfg.maxLots, maxPositions: cfg.maxPositions,
+      getQuote: (s) => quote.quotes.get(s),
+    });
+    ts.connected = false;
+    trade.on("up", () => { ts.connected = true; report(); });
+    trade.on("down", () => { ts.connected = false; report(); });
+    trade.on("event", (e) => { log(`[TRADE] ${e.type} ${e.symbol} ${e.price ?? ""} ${e.reason ?? ""}`); pendingEvents.push(e); report(); });
+    trade.on("positions", (p) => { pendingPositions = p; report(); });
+    pollTimer = setInterval(poll, cfg.pollEveryMs);
+    log(`ordens pela cTrader Open API (máx ${cfg.maxLots} lote por ordem, ${cfg.maxPositions} posições); sessão FIX TRADE não é aberta`);
+  } else if (cfg.tradeEnabled) {
+    trade = new TradeSession({
+      ...cfg, port: cfg.tradePort, log,
+      maxLots: cfg.maxLots, maxPositions: cfg.maxPositions,
+      getQuote: (s) => quote.quotes.get(s),
+    });
+    reconnecting(trade, ts, isStopped);
+    trade.on("event", (e) => { log(`[TRADE] ${e.type} ${e.symbol} ${e.price ?? ""} ${e.reason ?? ""}`); pendingEvents.push(e); report(); });
+    trade.on("positions", (p) => { pendingPositions = p; report(); });
+    trade.on("down", () => report());
+    pollTimer = setInterval(poll, cfg.pollEveryMs);
+    trade.connect();
+    log(`ordens pela sessão FIX TRADE (máx ${cfg.maxLots} lote por ordem, ${cfg.maxPositions} posições)`);
+  } else {
+    log("sessão TRADE desligada (TRADE_ENABLED=false): só preços");
+  }
+
+  openapi?.start();
 
   const stop = () => {
     openapi?.stop();
