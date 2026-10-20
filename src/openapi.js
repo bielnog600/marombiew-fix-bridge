@@ -184,7 +184,7 @@ export class OpenApiAccount extends EventEmitter {
 
   publish() {
     const s = this.state;
-    if (s.balance == null) return;
+    if (s.balance == null || s.marginUsed == null) return; // só publica com saldo e margem (o app exige os dois)
     const equity = +(s.balance + (s.unrealized ?? 0)).toFixed(2);
     const marginUsed = s.marginUsed == null ? null : +s.marginUsed.toFixed(2);
     this.emit("account", {
