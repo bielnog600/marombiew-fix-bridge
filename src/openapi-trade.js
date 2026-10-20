@@ -349,7 +349,11 @@ export class OpenApiTrader extends EventEmitter {
       }
       this.positions.delete(posId);
       this.manage.delete(posId);
-      this.event("closed", { cmdId: req?.cmdId ?? null, sym: prev.symbol, side: OPPOSITE[prev.side], units: prev.units, posId }, { price, reason });
+      // preço de saída: o do negócio de fechamento; sem ele, a cotação ao vivo do lado que fecha (nunca 0)
+      let exitPrice = [p.deal?.executionPrice, order.executionPrice].map(Number).find((v) => v > 0) ?? null;
+      if (!exitPrice) { const q = this.cfg.getQuote?.(prev.symbol); exitPrice = q ? (prev.side === "buy" ? q.bid : q.ask) : null; }
+      this.log(`fechada ${prev.symbol} posição ${posId} a ${exitPrice} (${reason})`);
+      this.event("closed", { cmdId: req?.cmdId ?? null, sym: prev.symbol, side: OPPOSITE[prev.side], units: prev.units, posId }, { price: exitPrice, reason });
       this.publishPositions(true);
       return;
     }

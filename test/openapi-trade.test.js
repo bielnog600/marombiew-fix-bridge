@@ -138,3 +138,13 @@ test("Open API: posição aberta sem stop na corretora gera alerta uma vez", () 
   h.reply(PT.RECONCILE_RES, { position: [position({ stopLoss: 0 })] });
   assert.equal(h.events.filter((e) => e.type === "protection_failed").length, 1);
 });
+
+test("Open API: fechamento sem preço no evento usa a cotação ao vivo (nunca 0)", () => {
+  const h = setup();
+  h.reply(PT.RECONCILE_RES, { position: [position()] });
+  const c = cmd({ action: "close", position_id: "500" });
+  h.t.execute(c);
+  h.reply(PT.EXECUTION_EVENT, { executionType: 3, order: { executionPrice: 0 }, position: position({ positionStatus: 2, price: 0 }) });
+  const e = h.events.find((x) => x.type === "closed");
+  assert.equal(e.price, 1.121); // bid do EUR/USD no teste
+});
