@@ -41,3 +41,18 @@ test("Open API: sem token no app, tenta de novo depois (não derruba a ponte)", 
   assert.match(logs[0], /sem token/);
   acc.stop();
 });
+
+test("Open API: token novo no app (conta reconectada) faz a ponte reconectar com ele", async () => {
+  let token = "velho";
+  const acc = new OpenApiAccount({
+    login: "9010569", pollMs: 999999, tokenCheckMs: 20, WebSocketImpl: FakeWS,
+    getAuth: async () => ({ client_id: "cid", client_secret: "sec", access_token: token }),
+  });
+  await acc.start();
+  await new Promise((r) => setTimeout(r, 5));
+  const first = FakeWS.last;
+  token = "novo";
+  await new Promise((r) => setTimeout(r, 60));
+  acc.stop();
+  assert.equal(first.readyState, 3);
+});

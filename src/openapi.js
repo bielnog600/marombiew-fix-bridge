@@ -63,6 +63,8 @@ export class OpenApiAccount extends EventEmitter {
       this.backoff = 5000;
       this.send(PT.APP_AUTH_REQ, { clientId: this.auth.client_id, clientSecret: this.auth.client_secret });
       this.timers.push(setInterval(() => this.send(PT.HEARTBEAT, {}), 25000));
+      // conta reconectada no app (token novo, ex.: com permissão de operar): troca sem reiniciar a ponte
+      this.timers.push(setInterval(() => this.checkToken(), this.cfg.tokenCheckMs ?? 60000));
     };
     ws.onmessage = (ev) => {
       try { this.handle(JSON.parse(typeof ev.data === "string" ? ev.data : ev.data.toString())); }
@@ -74,6 +76,17 @@ export class OpenApiAccount extends EventEmitter {
       this.emit("status", { connected: false });
       if (!this.stopped) { this.log(`desconectado; nova tentativa em ${this.backoff / 1000}s`); this.retry(this.backoff); this.backoff = Math.min(this.backoff * 2, 300000); }
     };
+  }
+
+  async checkToken() {
+    try {
+      const a = await this.cfg.getAuth();
+      if (a?.access_token && this.auth && a.access_token !== this.auth.access_token) {
+        this.log("token novo no app (conta reconectada): reconectando com ele");
+        this.backoff = 1000;
+        try { this.ws?.close(); } catch {}
+      }
+    } catch { /* app fora do ar: segue com o token atual */ }
   }
 
   retry(ms) {

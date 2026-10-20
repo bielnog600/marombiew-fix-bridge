@@ -8,7 +8,7 @@ import { CandleBuilder } from "./candles.js";
 import { OpenApiAccount } from "./openapi.js";
 import { OpenApiTrader } from "./openapi-trade.js";
 
-export const VERSION = "1.6.1";
+export const VERSION = "1.6.2";
 
 const env = (k, d) => {
   const v = process.env[k];
