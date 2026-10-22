@@ -8,7 +8,7 @@ import { CandleBuilder } from "./candles.js";
 import { OpenApiAccount } from "./openapi.js";
 import { OpenApiTrader } from "./openapi-trade.js";
 
-export const VERSION = "1.6.4";
+export const VERSION = "1.6.5";
 
 const env = (k, d) => {
   const v = process.env[k];
@@ -98,7 +98,11 @@ export function startBridge(cfg = loadConfig()) {
     try {
       builder.flush();
       do {
-        const candles = builder.take(500);
+        // bid/ask atuais em cada vela enviada: o app usa para spread e preço de entrada do auto
+        const candles = builder.take(500).map((c) => {
+          const q = quote.quotes.get(c.symbol);
+          return q && q.bid > 0 && q.ask > 0 ? { ...c, bid: q.bid, ask: q.ask } : c;
+        });
         const body = {
           source: "ctrader-fix",
           status: { connected: qs.connected, last_tick_at: qs.lastTickAt, symbols: qs.subscribed, bridge_version: VERSION, message: qs.message },
